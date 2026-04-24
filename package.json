@@ -1,0 +1,23 @@
+{
+  "name": "js-wechat-mp-ops-skill",
+  "version": "0.1.0",
+  "description": "JS Eyes skill for WeChat Official Account backend analytics (content + user). Read-only; requires an already-logged-in browser tab on mp.weixin.qq.com.",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "doctor": "node index.js doctor",
+    "probe": "node index.js probe",
+    "state": "node index.js state",
+    "user-overview": "node index.js user-overview",
+    "user-attrs": "node index.js user-attrs",
+    "content-list": "node index.js content-list",
+    "content-detail": "node index.js content-detail"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
