@@ -1,0 +1,8 @@
+node_modules/
+
+# 业务运营数据 - 仅本地保留，不进仓
+docs/_data/
+docs/content-strategy-report-*.md
+
+# 业务专属脚本 - 与具体账号文章/数据耦合，仅本地保留
+scripts/growth-funnel.js
