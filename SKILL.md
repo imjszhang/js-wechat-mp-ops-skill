@@ -41,28 +41,46 @@ metadata:
   - 扩展：js-eyes 扩展 popup 里 `Allow Raw Eval` 打开
   - 少一侧会返回 `RAW_EVAL_DISABLED`。
 
-## 只读红线
+## 安全红线（READ / INTERACTIVE / DESTRUCTIVE）
 
-v0.1 **不提供任何写工具**。本 skill 的所有 bridge 方法都只做：
+本 skill 的所有工具都会被归入以下三档之一。审计界线按「是否改微信侧业务数据」而非「是否触网」来划：
 
-- DOM 读取（表格、卡片、KPI 文本）
-- `fetchCgiBin(path, params)` 重放已有登录凭证的 XHR（只做 GET，只取数据）
+### READ（默认档）
+纯读，不改任何 DOM、不改 URL、不触发任何业务写操作。
+- 走 DOM 读取（表格 / KPI 卡 / KPI 文本）
+- 走 `fetchCgiBin(path, params)` 重放已有登录凭证的 **GET** XHR（仅取数据）
+- 日常调用不触发 `js_eyes_execute_script: confirm` consent（除首次 bridge 注入）
+- 工具：`wechat_mp_user_overview` / `wechat_mp_user_attrs` / `wechat_mp_content_list` / `wechat_mp_content_list_all` / `wechat_mp_content_detail` / `wechat_mp_content_summary` / `wechat_mp_content_trend` / `wechat_mp_content_sources` / `wechat_mp_content_tables_dump`
 
-**不会**：发文、改菜单、改设置、点击"删除/取消关注"等任何 CTA。
+### INTERACTIVE（v0.3+）
+**只改浏览器自己筛选态/导航**，不改微信侧任何业务数据。实现硬约束：
+- 只允许 `location.assign(newUrl)` 方式切换 URL / query，**禁止模拟点击任何 DOM CTA**
+- 调用返回 `{from, to, hint}`，由调用方再 `state()` 做自校验
+- `skill.contract.js` 里带 `interactive: true` / `destructive: false` 两个字段
+- 工具：`wechat_mp_content_navigate`
 
-Safe Default Mode 兼容声明：
-
-- 本 skill 日常调用不触发 `js_eyes_execute_script: confirm` consent，除了首次 bridge 注入那一次
-- 若后续 v0.2+ 要加写工具，将在 `skill.contract.js` 里把该工具标记为 `destructive: true`，并要求调用方显式 `--confirm`
+### DESTRUCTIVE（永不做）
+任何改微信侧业务数据、生成导出文件、触发订阅变化的操作，v0.1+ 一直不会做：
+- 发文 / 删文 / 修改草稿 / 改菜单 / 改设置
+- 关注 / 取关 / 拉黑 / 回复 / 删评
+- 「下载数据明细」等导出 CTA（触发服务端生成文件）
+- 任何扫码登录自动化
+如果未来真的要做，将在 `skill.contract.js` 里把该工具标记 `destructive: true`，并要求调用方显式 `--confirm` 走 Safe Default Mode consent 流程。
 
 ## 提供的 AI 工具
 
-| 工具 | 页面 | 说明 |
-|---|---|---|
-| `wechat_mp_user_overview` | `/misc/useranalysis?1=1` | 用户增长概况：每日新增/取消/净增关注 + 累计总数 |
-| `wechat_mp_user_attrs` | `/misc/useranalysis?action=attr` | 用户属性：性别/年龄/地域/终端（关注数 < 100 时返回 `ready:false`） |
-| `wechat_mp_content_list` | `/misc/appmsganalysis?action=report` | 近期发表图文列表 + 阅读人数/占比 + `msgid`/`publish_date` |
-| `wechat_mp_content_detail` | `/misc/appmsganalysis?action=detailpage` | 单篇图文 KPI（阅读/完读率/分享/留言/收藏/阅读后关注）+ 地域表 |
+| 档位 | 工具 | 页面 | 说明 |
+|---|---|---|---|
+| READ | `wechat_mp_user_overview` | `/misc/useranalysis?1=1` | 用户增长概况：每日新增/取消/净增关注 + 累计总数 |
+| READ | `wechat_mp_user_attrs` | `/misc/useranalysis?action=attr` | 用户属性：性别/年龄/地域/终端（关注数 < 100 时返回 `ready:false`） |
+| READ | `wechat_mp_content_list` | `/misc/appmsganalysis?action=report` | 近期发表图文列表 + 阅读人数/占比 + `msgid`/`publish_date` |
+| READ | `wechat_mp_content_list_all` | `/misc/appmsganalysis?action=report` | 列表全量（不设 limit 默认）+ paginator 信息（总页/每页/总条数） |
+| READ | `wechat_mp_content_summary` | `/misc/appmsganalysis` | 子 tab + 日期范围 + 顶部 KPI 卡 + paginator 摘要（用于快速自检） |
+| READ | `wechat_mp_content_trend` | `/misc/appmsganalysis` | 走 `get_article_stat_tendency_and_source`：每日各场景 `read_uv` / `share_uv`（scene=9999 为合计） |
+| READ | `wechat_mp_content_sources` | `/misc/appmsganalysis` | 复用同一 XHR 的 `all_article_stat_source.list`：各来源渠道聚合 |
+| READ | `wechat_mp_content_tables_dump` | `/misc/appmsganalysis` | 调试用：按表头 + 前 N 行 dump 当前页所有表格，便于踩点改版 |
+| READ | `wechat_mp_content_detail` | `/misc/appmsganalysis?action=detailpage` | 单篇图文 KPI（阅读/完读率/分享/留言/收藏/阅读后关注）+ 地域表 |
+| INTERACTIVE | `wechat_mp_content_navigate` | `/misc/appmsganalysis` | 仅通过 `location.assign` 修改 URL 参数（切子 tab / 切日期 / 跳详情页）；绝不模拟点击 |
 
 全部工具都是 `optional: true`（按需加载），入参详见 `skill.contract.js::TOOL_DEFINITIONS`。
 
@@ -131,12 +149,24 @@ CLI / Tool call
 
 卸载：`js-eyes skills unlink /Volumes/home_x/github/my/js-wechat-mp-ops-skill`
 
+## 明确不做的事
+
+这些是 skill 在任何版本都不会做的事（DESTRUCTIVE 档位），避免后续补能力时跑偏：
+
+- 不模拟点击任何业务 CTA（发文 / 删文 / 改菜单 / 关注 / 拉黑 / 回复 / 删评）
+- 不触发「下载数据明细」等服务端导出（哪怕只是点 CTA 不下载）
+- 不尝试任何 POST / 写 XHR；`fetchCgiBin` 硬约束为 GET
+- 不实现扫码登录自动化 / cookie 注入 / token 伪造
+- 不使用未在浏览器里实际发生过的 XHR 端点；改版前先靠 DOM 兜底 + probe 侦察
+- 不代替用户做决策性操作（例如批量跳转、连续 navigate 累计筛选状态）
+
 ## 路线图
 
 - v0.2：视频号 / 菜单分析 / 流量来源（按同样模板增 profile + bridge）
 - v0.2：接入 `@js-eyes/skill-recording`，给每次 tool 调用留调试记录
-- v0.3：Highcharts 趋势图走 `fetchCgiBin` 重放，返回时间序列
-- 一直不会做：写操作（发文 / 改菜单 / 关注管理）、任何扫码登录自动化
+- v0.3：当前版本 — content-analysis 读全（summary / list-all / trend / sources / tables-dump）+ INTERACTIVE 档位的 `navigateContent`
+- v0.4：user-analysis 同样补齐 trend / sources / navigate
+- 一直不会做：见「明确不做的事」
 
 ## 故障排查
 

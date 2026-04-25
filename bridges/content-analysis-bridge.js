@@ -9,7 +9,7 @@
 
 (function install(){
   'use strict';
-  const VERSION = '0.1.3';
+  const VERSION = '0.3.0';
 
   // @@include ./common.js
 
@@ -305,7 +305,318 @@
     } catch (e) { return errResult(e && e.message || e, { stack: e && e.stack }); }
   }
 
-  const api = { probe, state, contentList, contentDetail };
+  // ── v0.3 新增：列表页页顶 KPI + 状态摘要 ────────────────────────────────────
+  /**
+   * contentSummary - 列表/汇总页的快速自检：subTab + 日期 + KPI + paginator
+   *
+   * 不依赖 XHR，纯 DOM。用于：
+   *   - AI 快速判断"我现在在哪张子页 / 能看到多少条图文"
+   *   - doctor 心跳
+   */
+  function contentSummary(){
+    try {
+      const login = readLoginState();
+      if (!login.loggedIn) return okResult({ ready: false, reason: 'not_logged_in', login });
+
+      const u = new URL(location.href);
+      const action = u.searchParams.get('action');
+      const type = u.searchParams.get('type');
+      const front_type = u.searchParams.get('front_type');
+      const subTabLabel = {
+        report: '已发表内容',
+        all: front_type ? '全部' : '未开启通知内容',
+        detailpage: '单篇详情',
+        download_summary_tendency: '下载数据明细',
+      }[action] || null;
+
+      const dates = readDateRangeFromDom();
+
+      // 尝试抓顶部 KPI：.bottom_data_tips（详情页常见）或 .overview_* / .data_card 等
+      const kpiSelectors = [
+        '.bottom_data_tips',
+        '.overview_box .num',
+        '.data_card',
+        '.weui-desktop-chart__legend li',
+      ];
+      const seen = new Set();
+      const kpiCards = [];
+      for (const sel of kpiSelectors){
+        const nodes = Array.from(document.querySelectorAll(sel));
+        for (const el of nodes){
+          const raw = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          if (!raw || seen.has(raw)) continue;
+          seen.add(raw);
+          const numMatch = raw.match(/([\d,.]+)\s*([%人次元篇天分秒]*)/);
+          kpiCards.push({
+            raw: raw.slice(0, 120),
+            label: raw.replace(/[\d,%人次元篇天分秒\s.]+$/, '').trim().slice(0, 40) || null,
+            value: numMatch ? textNum(numMatch[1]) : null,
+            unit: numMatch && numMatch[2] ? numMatch[2] : null,
+            selector: sel,
+          });
+          if (kpiCards.length >= 20) break;
+        }
+        if (kpiCards.length >= 20) break;
+      }
+
+      return okResult({
+        ready: true,
+        login,
+        subTab: { action: action || null, type: type || null, front_type: front_type || null, label: subTabLabel },
+        dateFrom: dates.rangeFrom,
+        dateTo: dates.rangeTo,
+        singleDay: dates.singleDay,
+        kpiCards,
+        pagination: readPaginator(),
+        tableCount: document.querySelectorAll('table').length,
+        version: VERSION,
+      });
+    } catch (e) { return errResult(e && e.message || e, { stack: e && e.stack }); }
+  }
+
+  // ── v0.3 新增：列表全量（去 limit 默认）+ paginator ────────────────────────
+  /**
+   * contentListAll - 复用 contentList 表格选择 + 行过滤逻辑，但不设默认 limit，
+   * 并附带 paginator 信息，供调用方判断是否需要 navigateContent 翻页。
+   */
+  function contentListAll(args){
+    args = args || {};
+    try {
+      const login = readLoginState();
+      if (!login.loggedIn) return errResult('not_logged_in', { login });
+
+      const table = findTableByHeader([/内容标题|标题/, /阅读人数|阅读数|阅读/]);
+      const items = [];
+      if (table) {
+        const rows = Array.from(table.querySelectorAll('tbody tr'));
+        for (const tr of rows) {
+          const tds = tr.querySelectorAll('td');
+          if (tr.className) continue;
+          if (tds.length !== 4) continue;
+          const titleCell = tds[0];
+          const titleText = (titleCell.textContent || '').replace(/\s+/g, ' ').trim();
+          const titleMatch = titleText.match(/^(.*?)\s*发表时间[：:]\s*(\d{4}\/\d{2}\/\d{2})/);
+          const title = titleMatch ? titleMatch[1] : titleText;
+          const publishDate = titleMatch ? titleMatch[2].replace(/\//g, '-') : null;
+          const a = tr.querySelector('a[href*="action=detailpage"]');
+          let msgid = null, publish_date_url = null, detailHref = null;
+          if (a) {
+            try {
+              const u2 = new URL(a.href);
+              msgid = u2.searchParams.get('msgid');
+              publish_date_url = u2.searchParams.get('publish_date');
+              detailHref = a.href;
+            } catch(_){}
+          }
+          items.push({
+            msgid,
+            title,
+            publishDate: publish_date_url || publishDate,
+            reads: textNum(tds[1].textContent),
+            readsRate: (tds[2].textContent || '').replace(/\s+/g,' ').trim(),
+            detailHref,
+          });
+        }
+      }
+
+      const limit = args.limit ? Number(args.limit) : null;
+      const limited = (limit && limit > 0) ? items.slice(0, limit) : items;
+      return okResult({
+        login,
+        listTableFound: !!table,
+        listHeaders: table
+          ? Array.from(table.querySelectorAll('thead th')).map((th) => (th.textContent || '').replace(/\s+/g,'').trim())
+          : [],
+        totalCount: items.length,
+        items: limited,
+        pagination: readPaginator(),
+      });
+    } catch (e) { return errResult(e && e.message || e, { stack: e && e.stack }); }
+  }
+
+  // ── v0.3 新增：所有表格 dump（调试/踩点用） ─────────────────────────────────
+  function contentTablesDump(args){
+    args = args || {};
+    try {
+      const limit = Number(args.limit) > 0 ? Number(args.limit) : 8;
+      const rowLimit = Number(args.rowLimit) > 0 ? Number(args.rowLimit) : 10;
+      const tables = Array.from(document.querySelectorAll('table'))
+        .filter((t) => t.querySelectorAll('thead th').length > 0)
+        .slice(0, limit);
+      const tableSummaries = tables.map((t, idx) => {
+        const headers = Array.from(t.querySelectorAll('thead th'))
+          .map((th) => (th.textContent || '').replace(/\s+/g,'').trim());
+        const rowCount = t.querySelectorAll('tbody tr').length;
+        const rows = Array.from(t.querySelectorAll('tbody tr')).slice(0, rowLimit).map((tr) =>
+          Array.from(tr.querySelectorAll('td')).map((td) => (td.textContent || '').replace(/\s+/g,' ').trim()),
+        );
+        return { index: idx, headers, rowCount, rows };
+      });
+      return okResult({
+        totalTablesWithHead: tableSummaries.length,
+        totalTables: document.querySelectorAll('table').length,
+        tables: tableSummaries,
+      });
+    } catch (e) { return errResult(e && e.message || e, { stack: e && e.stack }); }
+  }
+
+  // ── v0.3 新增：共享 XHR 调用 + scene 映射 ──────────────────────────────────
+  // 来源 scene 代号 → 可读标签。未知 scene 在调用方侧回退为 `scene_<n>`。
+  // 参考后台 i18n，非官方文档；改版后可能需要调整。
+  const SCENE_LABELS = {
+    0:    '公众号会话',
+    1:    '朋友圈',
+    2:    '好友转发',
+    3:    '历史消息',
+    4:    '看一看',
+    5:    '搜一搜',
+    6:    '推荐流',
+    7:    '其他',
+    8:    '付费内容',
+    9:    '视频号',
+    10:   '专辑',
+    11:   'AI 搜索',
+    9999: '合计',
+  };
+  function labelForScene(n){
+    if (SCENE_LABELS[n]) return SCENE_LABELS[n];
+    return 'scene_' + n;
+  }
+
+  async function fetchTendencyRaw(args){
+    const range = rangeToTimestamps(args.range, args.dateFrom, args.dateTo);
+    const resp = await fetchCgiBin('/misc/appmsganalysis', {
+      action: 'get_article_stat_tendency_and_source',
+      begin_timestamp: String(range.beginTimestamp),
+      end_timestamp: String(range.endTimestamp),
+    });
+    return { range, resp };
+  }
+
+  /**
+   * contentTrend - 日趋势（每天各 scene 的 read_uv / share_uv；scene=9999 为合计）
+   */
+  async function contentTrend(args){
+    args = args || {};
+    try {
+      const login = readLoginState();
+      if (!login.loggedIn) return errResult('not_logged_in', { login });
+      const { range, resp } = await fetchTendencyRaw(args);
+      if (!resp || !resp.ok || !resp.data) {
+        return okResult({ ready: false, reason: 'xhr_failed', range, raw: resp || null });
+      }
+      const base = resp.data.base_resp || {};
+      if (base.ret !== 0) {
+        return okResult({ ready: false, reason: 'base_resp_err', retCode: base.ret, retMsg: base.err_msg || null, range });
+      }
+      const rawList = ((resp.data.all_article_stat_tendency || {}).list) || [];
+      // 结构化成 byDate：{ [dateIso]: { total: {...}, bySceneList: [...] } }
+      const byDate = {};
+      for (const row of rawList){
+        const ts = row.date;
+        const iso = new Date(ts * 1000).toISOString().slice(0, 10);
+        if (!byDate[iso]) byDate[iso] = { date: iso, timestamp: ts, total: null, scenes: [] };
+        const enriched = Object.assign({}, row, { sceneLabel: labelForScene(row.scene) });
+        if (row.scene === 9999) byDate[iso].total = enriched;
+        else byDate[iso].scenes.push(enriched);
+      }
+      const series = Object.values(byDate).sort((a, b) => a.timestamp - b.timestamp);
+      return okResult({
+        ready: true,
+        range,
+        series,
+        totalPoints: rawList.length,
+        url: resp.url || null,
+      });
+    } catch (e) { return errResult(e && e.message || e, { stack: e && e.stack }); }
+  }
+
+  /**
+   * contentChannelBreakdown - 时段聚合的来源/渠道分布（复用同一 XHR 响应）
+   */
+  async function contentChannelBreakdown(args){
+    args = args || {};
+    try {
+      const login = readLoginState();
+      if (!login.loggedIn) return errResult('not_logged_in', { login });
+      const { range, resp } = await fetchTendencyRaw(args);
+      if (!resp || !resp.ok || !resp.data) {
+        return okResult({ ready: false, reason: 'xhr_failed', range, raw: resp || null });
+      }
+      const base = resp.data.base_resp || {};
+      if (base.ret !== 0) {
+        return okResult({ ready: false, reason: 'base_resp_err', retCode: base.ret, retMsg: base.err_msg || null, range });
+      }
+      const src = (resp.data.all_article_stat_source || {}).list;
+      if (!Array.isArray(src) || src.length === 0) {
+        return okResult({ ready: false, reason: 'no_source_in_response', range });
+      }
+      const channels = src.map((row) => Object.assign({}, row, { sceneLabel: labelForScene(row.scene) }));
+      const totalReadUv = channels.reduce((s, r) => s + (Number(r.read_uv) || 0), 0);
+      const withShare = channels.map((r) => Object.assign({}, r, {
+        readUvShare: totalReadUv > 0 ? Number((r.read_uv / totalReadUv * 100).toFixed(2)) : null,
+      }));
+      return okResult({
+        ready: true,
+        range,
+        totalReadUv,
+        channels: withShare.sort((a, b) => (b.read_uv || 0) - (a.read_uv || 0)),
+        url: resp.url || null,
+      });
+    } catch (e) { return errResult(e && e.message || e, { stack: e && e.stack }); }
+  }
+
+  // ── v0.3 新增：INTERACTIVE 导航（仅改 URL，不模拟点击） ────────────────────
+  /**
+   * navigateContent - 通过 location.assign 切换筛选态 / 子 tab / 跳详情页
+   *
+   * 支持参数：
+   *   action     -> ?action=report | all | detailpage | download_summary_tendency
+   *   type       -> ?type=daily_v2 等
+   *   front_type -> ?front_type=...
+   *   msgid, publishDate -> 跳详情页时用
+   *   clear      -> true 时把 msgid / publish_date 从 URL 中清掉（回列表）
+   *
+   * 不支持：点击 CTA / 触发下载 / 自动翻页。翻页请多次调用自己，带 offset/page。
+   */
+  function navigateContent(args){
+    args = args || {};
+    try {
+      const login = readLoginState();
+      if (!login.loggedIn) return errResult('not_logged_in', { login });
+      const fromUrl = location.href;
+      const patch = {};
+      if (args.action != null) patch.action = args.action;
+      if (args.type != null) patch.type = args.type;
+      if (args.front_type != null) patch.front_type = args.front_type;
+      if (args.msgid != null) patch.msgid = args.msgid;
+      if (args.publishDate != null) patch.publish_date = args.publishDate;
+      if (args.clear) { patch.msgid = null; patch.publish_date = null; }
+      if (Object.keys(patch).length === 0) {
+        return okResult({ ready: false, reason: 'empty_patch', from: { url: fromUrl } });
+      }
+      const toUrl = buildQueryPatch(patch);
+      if (toUrl === fromUrl) {
+        return okResult({ ready: true, noop: true, from: { url: fromUrl }, to: { url: toUrl } });
+      }
+      // 只改 URL，不点击。reload 由浏览器自己做；bridge 会在新页面被自动重注。
+      location.assign(toUrl);
+      return okResult({
+        ready: true,
+        from: { url: fromUrl },
+        to: { url: toUrl },
+        patch,
+        hint: '页面已发起导航；调用方应在新页面上再 state() 做自校验（session 层会自动重注 bridge）。',
+      });
+    } catch (e) { return errResult(e && e.message || e, { stack: e && e.stack }); }
+  }
+
+  const api = {
+    probe, state, contentList, contentDetail,
+    contentSummary, contentListAll, contentTablesDump,
+    contentTrend, contentChannelBreakdown,
+    navigateContent,
+  };
   Object.defineProperty(api, '__meta', {
     value: { version: VERSION, installedAt: new Date().toISOString() },
   });

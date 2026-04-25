@@ -82,9 +82,14 @@ async function fetchCgiBin(path, params, options){
 function readAccountInfo(){
   const candidates = [
     '.weui-desktop-account__nickname',
+    '.weui-desktop-account__info .nickname',
+    '.weui-desktop-account__profile .weui-desktop-account__nickname',
+    '.weui-desktop-account_switch .weui-desktop-account__nickname',
     '.account_nickname',
     '.acct_nickname_wrp',
     '.account_name',
+    '.weui-desktop-account__mobile-name',
+    '[class*="account"][class*="nickname"]',
   ];
   for (const s of candidates){
     const n = document.querySelector(s);
@@ -94,6 +99,60 @@ function readAccountInfo(){
     }
   }
   return null;
+}
+
+/**
+ * readPaginator - 通用分页信息解析（失败返回 null，不抛）
+ * 尝试解析 weui-desktop-pagination / 兼容旧 pagination 结构
+ */
+function readPaginator(){
+  const containers = Array.from(document.querySelectorAll(
+    '.weui-desktop-pagination, .pagination, [class*="pagination"]'
+  ));
+  for (const c of containers){
+    const text = (c.textContent || '').replace(/\s+/g, '');
+    if (!text) continue;
+    const total = /共(\d+)[条项]/.exec(text);
+    const totalPages = /共(\d+)页/.exec(text);
+    const currentLi = c.querySelector('.weui-desktop-pagination__num_current, .current, .active');
+    const numLis = Array.from(c.querySelectorAll('.weui-desktop-pagination__num, li a, a'))
+      .map((a) => (a.textContent || '').trim())
+      .filter((t) => /^\d+$/.test(t));
+    const current = currentLi
+      ? parseInt((currentLi.textContent || '').trim(), 10)
+      : null;
+    if (total || totalPages || numLis.length) {
+      return {
+        totalItems: total ? parseInt(total[1], 10) : null,
+        totalPages: totalPages ? parseInt(totalPages[1], 10)
+          : (numLis.length ? parseInt(numLis[numLis.length - 1], 10) : null),
+        currentPage: Number.isFinite(current) ? current : null,
+        rawText: text.slice(0, 200),
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * buildQueryPatch - 基于 location.search 合并 patch，产出新的 URL（不触网、不导航）
+ *   - null / undefined 值 => 删除该 key
+ *   - 其他值 => 强制转 String 写入
+ * 调用方负责决定是否 location.assign(newUrl)。
+ */
+function buildQueryPatch(patch){
+  const u = new URL(location.href);
+  const p = u.searchParams;
+  const input = patch || {};
+  for (const k of Object.keys(input)){
+    const v = input[k];
+    if (v == null || v === '') {
+      p.delete(k);
+    } else {
+      p.set(k, String(v));
+    }
+  }
+  return u.origin + u.pathname + '?' + p.toString();
 }
 
 function readLoginState(){

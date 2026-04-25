@@ -68,6 +68,15 @@ async function runDoctor(opts) {
       } catch (err) {
         section.stateError = { message: err.message };
       }
+      // v0.3 心跳：content-analysis 页面额外跑一次 contentSummary；
+      // 失败只记录不中断，用于尽早发现后台改版。
+      if (pageName === 'content-analysis') {
+        try {
+          section.summary = await session.callApi('contentSummary');
+        } catch (err) {
+          section.summaryError = { message: err.message };
+        }
+      }
     } catch (err) {
       section.connectError = { code: err.code || null, message: err.message };
     } finally {
@@ -107,6 +116,55 @@ async function runContentDetail(opts, positional) {
   }
 }
 
+/**
+ * content-navigate：INTERACTIVE 档位，仅改 URL，不点击。
+ * 调用 bridge 的 navigateContent 后 reload 触发 bridge 丢失；
+ * 通过 session.awaitBridgeAfterNav 等重注 + 自校验后返回新 state。
+ */
+async function runContentNavigate(opts) {
+  const navArgs = {
+    action: opts.toAction || null,
+    type: opts.toType || null,
+    front_type: opts.toFrontType || null,
+    msgid: opts.msgid || null,
+    publishDate: opts.publishDate || null,
+    clear: !!opts.clear,
+  };
+  const hasAny = Object.values(navArgs).some((v) => v != null && v !== false && v !== '');
+  if (!hasAny) {
+    throw Object.assign(
+      new Error('content-navigate 至少要提供一个改参参数：--to-action/--to-type/--msgid/--publish-date/--clear'),
+      { code: 'E_BAD_ARG' },
+    );
+  }
+  const session = new Session({ opts: Object.assign({}, opts, { page: 'content-analysis' }) });
+  try {
+    await session.connect();
+    await session.resolveTarget();
+    await session.ensureBridge();
+    const navResp = await session.callApi('navigateContent', [navArgs]);
+    if (!navResp || !navResp.ok) {
+      printJson({ nav: navResp, postState: null });
+      return;
+    }
+    const noop = navResp.data && navResp.data.noop === true;
+    const fromUrl = navResp.data && navResp.data.from && navResp.data.from.url;
+    const expectedUrl = navResp.data && navResp.data.to && navResp.data.to.url;
+    const postState = noop
+      ? { ready: true, attempts: 0, currentUrl: fromUrl || null, state: null, skipped: 'noop' }
+      : await session.awaitBridgeAfterNav({
+          timeoutMs: 20000,
+          intervalMs: 500,
+          initialDelayMs: 400,
+          fromUrl: fromUrl || null,
+          expectedUrl: expectedUrl || null,
+        });
+    printJson({ nav: navResp, postState });
+  } finally {
+    await session.close();
+  }
+}
+
 async function main(argv) {
   const { opts, positional } = parseArgv(argv);
   const command = positional.shift();
@@ -129,6 +187,10 @@ async function main(argv) {
   }
   if (command === 'content-detail') {
     await runContentDetail(opts, positional);
+    return 0;
+  }
+  if (command === 'content-navigate') {
+    await runContentNavigate(opts);
     return 0;
   }
   if (def.kind === 'call') {

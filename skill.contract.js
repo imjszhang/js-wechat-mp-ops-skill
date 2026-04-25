@@ -12,6 +12,12 @@ const CLI_COMMANDS = [
   { name: 'user-attrs', description: '用户属性：性别/年龄/地域/终端（需关注数≥100）' },
   { name: 'content-list', description: '近期图文列表 + 核心指标（阅读/分享/点赞/留言）' },
   { name: 'content-detail', description: '单篇图文详情，需要先把 tab 切到 action=detailpage 的 URL' },
+  { name: 'content-summary', description: '内容分析页状态摘要（子 tab + 日期 + KPI + paginator）' },
+  { name: 'content-list-all', description: '图文列表全量 + paginator' },
+  { name: 'content-trend', description: '日趋势（XHR 重放）' },
+  { name: 'content-sources', description: '来源/渠道分布（XHR 重放，复用同一响应）' },
+  { name: 'content-tables-dump', description: '当前页所有表格 dump（调试/踩点用）' },
+  { name: 'content-navigate', description: 'INTERACTIVE：改 URL 切子 tab / 切日期 / 跳详情页（不模拟点击）' },
 ];
 
 function makeLogger(logger) {
@@ -146,6 +152,105 @@ const TOOL_DEFINITIONS = [
     pageKey: 'content-analysis',
     method: 'contentDetail',
   },
+  {
+    name: 'wechat_mp_content_summary',
+    label: 'WeChat MP: 内容分析页状态摘要',
+    description: '快速自检：当前子 tab + 日期范围 + 顶部 KPI 卡 + paginator + bridge version。适合做心跳、写指令前先确认状态。READ-ONLY。',
+    parameters: {
+      type: 'object',
+      properties: { tabId: { type: 'number' } },
+    },
+    optional: true,
+    pageKey: 'content-analysis',
+    method: 'contentSummary',
+  },
+  {
+    name: 'wechat_mp_content_list_all',
+    label: 'WeChat MP: 图文列表全量',
+    description: '同 wechat_mp_content_list 但不设 limit 默认，并附带 paginator 信息（总页/每页/总条数），便于调用方判断是否需要翻页。READ-ONLY。',
+    parameters: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'number' },
+        limit: { type: 'number', description: '结果条数上限；不传返回所有可见行' },
+      },
+    },
+    optional: true,
+    pageKey: 'content-analysis',
+    method: 'contentListAll',
+  },
+  {
+    name: 'wechat_mp_content_trend',
+    label: 'WeChat MP: 内容趋势（日）',
+    description: '重放 /misc/appmsganalysis?action=get_article_stat_tendency_and_source，返回每日按 scene 分组的 read_uv/share_uv；scene=9999 行是合计。READ-ONLY。',
+    parameters: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'number' },
+        range: { type: 'string', description: '7d | 30d | 90d' },
+        dateFrom: { type: 'string' },
+        dateTo: { type: 'string' },
+      },
+    },
+    optional: true,
+    pageKey: 'content-analysis',
+    method: 'contentTrend',
+  },
+  {
+    name: 'wechat_mp_content_sources',
+    label: 'WeChat MP: 内容来源分布',
+    description: '复用同一 XHR 的 all_article_stat_source.list，按 scene 汇总 read_uv/share_uv 并给出占比。READ-ONLY。',
+    parameters: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'number' },
+        range: { type: 'string' },
+        dateFrom: { type: 'string' },
+        dateTo: { type: 'string' },
+      },
+    },
+    optional: true,
+    pageKey: 'content-analysis',
+    method: 'contentChannelBreakdown',
+  },
+  {
+    name: 'wechat_mp_content_tables_dump',
+    label: 'WeChat MP: 页面表格 dump（调试）',
+    description: '把当前页所有带 thead 的 <table> 的表头 + 前 N 行 dump 出来，用于改版后踩点。READ-ONLY。',
+    parameters: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'number' },
+        limit: { type: 'number', description: '最多返回几张表（默认 8）' },
+        rowLimit: { type: 'number', description: '每张表保留多少行（默认 10）' },
+      },
+    },
+    optional: true,
+    pageKey: 'content-analysis',
+    method: 'contentTablesDump',
+  },
+  {
+    name: 'wechat_mp_content_navigate',
+    label: 'WeChat MP: 内容分析页导航（INTERACTIVE）',
+    description: 'INTERACTIVE：仅通过 location.assign 改 URL 参数，切子 tab / 换日期 / 跳详情页；不模拟任何 DOM 点击。不触发微信侧业务写操作。调用后应再 state() 自校验。',
+    parameters: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'number' },
+        action: { type: 'string', description: 'report | all | detailpage | download_summary_tendency' },
+        type: { type: 'string', description: '如 daily_v2；与 action 语义挂钩' },
+        front_type: { type: 'string' },
+        msgid: { type: 'string', description: '跳详情页时传' },
+        publishDate: { type: 'string', description: 'YYYY-MM-DD，与 msgid 搭配' },
+        clear: { type: 'boolean', description: '为 true 时清掉 msgid / publish_date（回列表）' },
+      },
+    },
+    optional: true,
+    interactive: true,
+    destructive: false,
+    pageKey: 'content-analysis',
+    method: 'navigateContent',
+  },
 ];
 
 function createOpenClawAdapter(config = {}, logger) {
@@ -158,6 +263,8 @@ function createOpenClawAdapter(config = {}, logger) {
       description: tool.description,
       parameters: tool.parameters,
       optional: tool.optional,
+      interactive: tool.interactive === true,
+      destructive: tool.destructive === true,
       async execute(toolCallId, params) {
         const result = await runtime.runTool(tool.pageKey, tool.method, params || {});
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
@@ -188,6 +295,8 @@ module.exports = {
       description: tool.description,
       parameters: tool.parameters,
       optional: tool.optional,
+      interactive: tool.interactive === true,
+      destructive: tool.destructive === true,
     })),
   },
   createRuntime,
