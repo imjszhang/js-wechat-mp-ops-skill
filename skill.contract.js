@@ -10,6 +10,7 @@ const CLI_COMMANDS = [
   { name: 'state', description: '当前筛选态（支持 --page）' },
   { name: 'user-overview', description: '用户增长：粉丝总数/新增/取消/净增（基于 DOM 表格）' },
   { name: 'user-attrs', description: '用户属性：性别/年龄/地域/终端（需关注数≥100）' },
+  { name: 'user-navigate', description: 'INTERACTIVE：改 URL 切 user-analysis 子 tab（attr / activity_analysis_page / clear 回增长）' },
   { name: 'content-list', description: '近期图文列表 + 核心指标（阅读/分享/点赞/留言）' },
   { name: 'content-detail', description: '单篇图文详情，需要先把 tab 切到 action=detailpage 的 URL' },
   { name: 'content-summary', description: '内容分析页状态摘要（子 tab + 日期 + KPI + paginator）' },
@@ -182,7 +183,7 @@ const TOOL_DEFINITIONS = [
   {
     name: 'wechat_mp_content_trend',
     label: 'WeChat MP: 内容趋势（日）',
-    description: '重放 /misc/appmsganalysis?action=get_article_stat_tendency_and_source，返回每日按 scene 分组的 read_uv/share_uv；scene=9999 行是合计。READ-ONLY。',
+    description: '重放 /misc/appmsganalysis?action=get_article_stat_tendency_and_source，返回每日按 scene 分组的 read_uv/share_uv；scene=9999 行是合计。传 msgid（可选搭配 publishDate）切单篇维度；不传则是图文整体合计。READ-ONLY。',
     parameters: {
       type: 'object',
       properties: {
@@ -190,6 +191,8 @@ const TOOL_DEFINITIONS = [
         range: { type: 'string', description: '7d | 30d | 90d' },
         dateFrom: { type: 'string' },
         dateTo: { type: 'string' },
+        msgid: { type: 'string', description: '可选：单篇 msgid（形如 2247484081_1）；端点会按单篇维度返回趋势' },
+        publishDate: { type: 'string', description: '可选搭配 msgid：YYYY-MM-DD' },
       },
     },
     optional: true,
@@ -199,7 +202,7 @@ const TOOL_DEFINITIONS = [
   {
     name: 'wechat_mp_content_sources',
     label: 'WeChat MP: 内容来源分布',
-    description: '复用同一 XHR 的 all_article_stat_source.list，按 scene 汇总 read_uv/share_uv 并给出占比。READ-ONLY。',
+    description: '复用同一 XHR 的 all_article_stat_source.list，按 scene 汇总 read_uv/share_uv 并给出占比。传 msgid（可选搭配 publishDate）切单篇维度。READ-ONLY。',
     parameters: {
       type: 'object',
       properties: {
@@ -207,6 +210,8 @@ const TOOL_DEFINITIONS = [
         range: { type: 'string' },
         dateFrom: { type: 'string' },
         dateTo: { type: 'string' },
+        msgid: { type: 'string', description: '可选：单篇 msgid' },
+        publishDate: { type: 'string', description: '可选搭配 msgid：YYYY-MM-DD' },
       },
     },
     optional: true,
@@ -230,16 +235,46 @@ const TOOL_DEFINITIONS = [
     method: 'contentTablesDump',
   },
   {
-    name: 'wechat_mp_content_navigate',
-    label: 'WeChat MP: 内容分析页导航（INTERACTIVE）',
-    description: 'INTERACTIVE：仅通过 location.assign 改 URL 参数，切子 tab / 换日期 / 跳详情页；不模拟任何 DOM 点击。不触发微信侧业务写操作。调用后应再 state() 自校验。',
+    name: 'wechat_mp_user_navigate',
+    label: 'WeChat MP: 用户分析页导航（INTERACTIVE）',
+    description: 'INTERACTIVE：仅通过 location.assign 切换 /misc/useranalysis 子 tab（attr=用户属性 / activity_analysis_page=常读用户分析 / clear=回用户增长）；不模拟点击任何 DOM CTA。调用后应再 state() 自校验。',
     parameters: {
       type: 'object',
       properties: {
         tabId: { type: 'number' },
-        action: { type: 'string', description: 'report | all | detailpage | download_summary_tendency' },
+        action: {
+          type: 'string',
+          enum: ['attr', 'activity_analysis_page'],
+          description: 'attr=用户属性；activity_analysis_page=常读用户分析；不传或 clear=true 时回到 "用户增长" 默认 tab',
+        },
+        clear: { type: 'boolean', description: '为 true 时强制清掉 action（回用户增长 tab）' },
+      },
+    },
+    optional: true,
+    interactive: true,
+    destructive: false,
+    pageKey: 'user-analysis',
+    method: 'navigateUser',
+  },
+  {
+    name: 'wechat_mp_content_navigate',
+    label: 'WeChat MP: 内容分析页导航（INTERACTIVE）',
+    description: 'INTERACTIVE：仅通过 location.assign 改 URL 参数，切子 tab / 换日期 / 跳详情页；不模拟任何 DOM 点击。不触发微信侧业务写操作。调用后应再 state() 自校验。download_summary_tendency 是触发下载的写操作，已被 bridge 显式拒绝，不在 enum 内。',
+    parameters: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'number' },
+        action: {
+          type: 'string',
+          enum: ['report', 'all', 'detailpage'],
+          description: 'report=已发表内容/全部 主 tab；all=已通知内容/未开启通知内容 主 tab；detailpage=单篇详情页',
+        },
         type: { type: 'string', description: '如 daily_v2；与 action 语义挂钩' },
-        front_type: { type: 'string' },
+        front_type: {
+          type: 'string',
+          enum: ['without_notice'],
+          description: '仅在 action=all 下生效；不传=已通知内容（默认），without_notice=未开启通知内容',
+        },
         msgid: { type: 'string', description: '跳详情页时传' },
         publishDate: { type: 'string', description: 'YYYY-MM-DD，与 msgid 搭配' },
         clear: { type: 'boolean', description: '为 true 时清掉 msgid / publish_date（回列表）' },

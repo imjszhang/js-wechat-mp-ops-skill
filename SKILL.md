@@ -1,7 +1,7 @@
 ---
 name: js-wechat-mp-ops-skill
 description: 微信公众号后台分析只读 skill，覆盖"用户分析 + 图文（内容）分析"两个板块。
-version: 0.1.0
+version: 0.5.0
 metadata:
   openclaw:
     emoji: "📊"
@@ -57,7 +57,7 @@ metadata:
 - 只允许 `location.assign(newUrl)` 方式切换 URL / query，**禁止模拟点击任何 DOM CTA**
 - 调用返回 `{from, to, hint}`，由调用方再 `state()` 做自校验
 - `skill.contract.js` 里带 `interactive: true` / `destructive: false` 两个字段
-- 工具：`wechat_mp_content_navigate`
+- 工具：`wechat_mp_content_navigate` / `wechat_mp_user_navigate`
 
 ### DESTRUCTIVE（永不做）
 任何改微信侧业务数据、生成导出文件、触发订阅变化的操作，v0.1+ 一直不会做：
@@ -76,13 +76,25 @@ metadata:
 | READ | `wechat_mp_content_list` | `/misc/appmsganalysis?action=report` | 近期发表图文列表 + 阅读人数/占比 + `msgid`/`publish_date` |
 | READ | `wechat_mp_content_list_all` | `/misc/appmsganalysis?action=report` | 列表全量（不设 limit 默认）+ paginator 信息（总页/每页/总条数） |
 | READ | `wechat_mp_content_summary` | `/misc/appmsganalysis` | 子 tab + 日期范围 + 顶部 KPI 卡 + paginator 摘要（用于快速自检） |
-| READ | `wechat_mp_content_trend` | `/misc/appmsganalysis` | 走 `get_article_stat_tendency_and_source`：每日各场景 `read_uv` / `share_uv`（scene=9999 为合计） |
-| READ | `wechat_mp_content_sources` | `/misc/appmsganalysis` | 复用同一 XHR 的 `all_article_stat_source.list`：各来源渠道聚合 |
+| READ | `wechat_mp_content_trend` | `/misc/appmsganalysis` | 走 `get_article_stat_tendency_and_source`：每日各场景 `read_uv` / `share_uv`（scene=9999 为合计）。v0.4 起支持可选 `msgid` / `publishDate`，端点会按单篇维度返回 |
+| READ | `wechat_mp_content_sources` | `/misc/appmsganalysis` | 复用同一 XHR 的 `all_article_stat_source.list`：各来源渠道聚合。v0.4 起支持可选 `msgid` / `publishDate` |
 | READ | `wechat_mp_content_tables_dump` | `/misc/appmsganalysis` | 调试用：按表头 + 前 N 行 dump 当前页所有表格，便于踩点改版 |
-| READ | `wechat_mp_content_detail` | `/misc/appmsganalysis?action=detailpage` | 单篇图文 KPI（阅读/完读率/分享/留言/收藏/阅读后关注）+ 地域表 |
-| INTERACTIVE | `wechat_mp_content_navigate` | `/misc/appmsganalysis` | 仅通过 `location.assign` 修改 URL 参数（切子 tab / 切日期 / 跳详情页）；绝不模拟点击 |
+| READ | `wechat_mp_content_detail` | `/misc/appmsganalysis?action=detailpage` | 单篇图文 KPI + 地域表 + v0.4 新增 `charts` 字段（9 张 Highcharts 全提取）：`readTrend` / `readChannel` / `subscribeFunnel`（阅读后关注漏斗）/ `shareTrans`（分享转化）/ `shareTrend` / `shareChannel`（分享去向）/ `gender` / `age` / `map`（地域）。全部走 SVG `<text>` 解析，不依赖私有 XHR |
+| INTERACTIVE | `wechat_mp_content_navigate` | `/misc/appmsganalysis` | 仅通过 `location.assign` 修改 URL 参数（切子 tab / 切日期 / 跳详情页）；绝不模拟点击。v0.4 起 `action` ∈ {`report`,`all`,`detailpage`}、`front_type` ∈ {空,`without_notice`}，传 `download_summary_tendency` 直接拒绝 |
+| INTERACTIVE | `wechat_mp_user_navigate` | `/misc/useranalysis` | v0.5 新增。仅通过 `location.assign` 切换 user-analysis 子 tab：`action` ∈ {`attr`,`activity_analysis_page`}，`clear=true` 回 "用户增长" 默认 tab；不模拟点击 |
 
 全部工具都是 `optional: true`（按需加载），入参详见 `skill.contract.js::TOOL_DEFINITIONS`。
+
+### 内部踩点 CLI（不进 `skill.contract.js`，仅供本仓库开发者排查）
+
+下面两条只在 CLI 暴露、不暴露给 AI tool 列表，用于改版后定位 DOM 结构变化或抓 XHR 形态：
+
+| CLI | 用途 |
+|---|---|
+| `node index.js content-detail-dump [--anchors] [--with-outer-html]` | 一次性 snapshot detailpage 上的关键 DOM 节点（`[id*=js_]` / `<dl>` / `<table>` / `.data_list` / `[class*=card]` / Highcharts 容器），输出 tag/class/role + text outline；`--anchors` 加锚点链接清单，`--with-outer-html` 顺带每节点首屏 outerHTML（仅本地调试用） |
+| `node index.js content-xhr-log [--filter <substr>]` | 读 `performance.getEntriesByType('resource')`，过滤 `mp.weixin.qq.com/misc/appmsganalysis` 命中条目，按 `action` 聚合并解析 querystring（最多 30 个参数），用来判断改版后端点是否新增 |
+
+这两条不写 listener、不挂 hook，纯靠浏览器内置 buffer，可放心反复跑。
 
 ## CLI
 
@@ -99,11 +111,24 @@ node index.js user-overview --range 30d
 # 用户属性
 node index.js user-attrs
 
+# v0.5：用户分析子 tab 导航（INTERACTIVE，仅改 URL）
+node index.js user-navigate --to-action attr               # 切到"用户属性"
+node index.js user-navigate --to-action activity_analysis_page  # 切到"常读用户分析"
+node index.js user-navigate --clear                         # 回"用户增长" tab
+
 # 近期图文列表
 node index.js content-list --limit 10
 
-# 单篇详情（先在浏览器里切到 detailpage URL）
+# 单篇详情（先在浏览器里切到 detailpage URL；v0.4 起返回阅读时长 / 完读率 / 分享去向等）
 node index.js content-detail 2247484081_1 2026-04-14
+
+# v0.4：单篇维度的趋势 / 来源（在 trend 端点上加 msgid/publish_date）
+node index.js content-trend --range 7d --msgid 2247484081_1 --publish-date 2026-04-14
+node index.js content-sources --range 7d --msgid 2247484081_1 --publish-date 2026-04-14
+
+# v0.4：内部踩点（仅本仓库开发者用）
+node index.js content-detail-dump --anchors
+node index.js content-xhr-log
 
 # 也可通过 js-eyes 统一入口
 js-eyes skill run js-wechat-mp-ops-skill doctor
@@ -143,7 +168,17 @@ bridge 注入后不注册事件监听器、定时器或 `MutationObserver`，只
 
 ### 为什么用 XHR 重放（v0.2+）
 
-当前 v0.1 主要靠 DOM（表格 + KPI 卡）。未来要扩展趋势图（Highcharts SVG），会在 `bridges/common.js::fetchCgiBin` 里重放 `/misc/appmsganalysis` 的 `action=get_article_stat_tendency_and_source` 等接口。DOM 读不到的数据走 XHR；可以读到就优先 DOM。
+v0.1 主要靠 DOM（表格 + KPI 卡）。v0.2+ 在 `bridges/common.js::fetchCgiBin` 里重放 `/misc/appmsganalysis` 的 `action=get_article_stat_tendency_and_source` 接口拿趋势/来源。DOM 读不到的数据走 XHR；可以读到就优先 DOM。
+
+### detailpage 的 Highcharts：为什么走 SVG 文本而不是 XHR（v0.4 决策）
+
+v0.4 规划阶段原本想给 detailpage 上 9 张 Highcharts 的数据走 XHR 重放，结论是**端点数 = 0**：
+
+- Stage A 用 `content-xhr-log` 在 detailpage 完整加载 + 切 panel + 翻日期的全过程都没抓到任何额外的 `appmsganalysis` XHR（仅 `get_article_stat_tendency_and_source` 一个，已在 trend/sources 用）。
+- Highcharts 11+ 实例没挂在 `window.Highcharts.charts` 上（多版本 ESM bundle），从 JS 侧拿不到原始数据。
+- 数据是页面 SSR 阶段一次性嵌进 `<svg>` 里的——所以 v0.4 改成对每张图直接读 SVG 中的 `<text>` 节点，做 Highcharts 11 anti-aliasing 伪重复去重（mirrored / pairwise 两道判别），按 `kind`（read-channel / share-channel / gender / age / read-time / finish-rate / follow-after / share-dest 等）做语义结构化。
+
+这样不依赖未声明的私有 XHR 端点，向前/向后兼容只受 SVG 类名 + 文本格式约束。
 
 ## 启用方式
 
@@ -173,8 +208,10 @@ bridge 注入后不注册事件监听器、定时器或 `MutationObserver`，只
 
 - v0.2：视频号 / 菜单分析 / 流量来源（按同样模板增 profile + bridge）
 - v0.2：接入 `@js-eyes/skill-recording`，给每次 tool 调用留调试记录
-- v0.3：当前版本 — content-analysis 读全（summary / list-all / trend / sources / tables-dump）+ INTERACTIVE 档位的 `navigateContent`
-- v0.4：user-analysis 同样补齐 trend / sources / navigate
+- v0.3：content-analysis 读全（summary / list-all / trend / sources / tables-dump）+ INTERACTIVE 档位的 `navigateContent`
+- v0.4：detailpage 二级 panel 全展开（阅读时长/完读率/阅读后关注/分享去向/渠道占比/性别年龄）走 SVG 文本提取；trend/sources 加 `msgid` 维度；`navigateContent` 白名单校验 + `front_type` enum；`download_summary_tendency` 显式拒绝；新增内部踩点 CLI `content-detail-dump` / `content-xhr-log`
+- **v0.5（当前版本）**：user-analysis 加 `navigateUser` INTERACTIVE 档位（切 attr / activity_analysis_page / clear 回增长，与 `navigateContent` 同模式，仅 `location.assign`）；CLI 抽出 `runNavigate` 公共流程；新增通用业务脚本 `scripts/batch-detail.js`（批量拉单篇详情）、`scripts/aggregate-content.js`（聚合详情产报表）
+- v0.6：user-analysis 补齐 trend / sources；list-all 真分页实测；`download_summary_tendency` 加更显眼的黑名单提示
 - 一直不会做：见「明确不做的事」
 
 ## 故障排查

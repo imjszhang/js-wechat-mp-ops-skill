@@ -5,11 +5,12 @@
 //
 // 暴露 window.__jse_mp_user__:
 //   probe() / state() / userOverview({range, dateFrom, dateTo}) / userAttrs({range, dateFrom, dateTo})
+//   navigateUser({action, clear})  // INTERACTIVE：仅改 URL 切子 tab
 // ---------------------------------------------------------------------------
 
 (function install(){
   'use strict';
-  const VERSION = '0.1.2';
+  const VERSION = '0.2.0';
 
   // @@include ./common.js
 
@@ -247,7 +248,63 @@
     } catch (e) { return errResult(e && e.message || e, { stack: e && e.stack }); }
   }
 
-  const api = { probe, state, userOverview, userAttrs };
+  // ── v0.2 新增：INTERACTIVE 导航（仅改 URL，不模拟点击） ────────────────────
+  /**
+   * navigateUser - 通过 location.assign 切换 user-analysis 子 tab
+   *
+   * 支持参数：
+   *   action -> ?action=attr | activity_analysis_page；不传或 clear=true 时回到
+   *             "用户增长"默认 tab（即清掉 action）
+   *   clear  -> true 时强制把 action 从 URL 中清掉（回 growth tab）
+   *
+   * 与 navigateContent 相同的硬约束：只 location.assign，不模拟点击；
+   * 不接受任何会触发服务端导出 / 修改业务态的 action。
+   */
+  const USER_NAV_ALLOWED_ACTIONS = ['attr', 'activity_analysis_page'];
+  function navigateUser(args){
+    args = args || {};
+    try {
+      const login = readLoginState();
+      if (!login.loggedIn) return errResult('not_logged_in', { login });
+      const fromUrl = location.href;
+      if (args.action != null && !USER_NAV_ALLOWED_ACTIONS.includes(args.action)) {
+        return errResult('action_not_allowed', {
+          allowedActions: USER_NAV_ALLOWED_ACTIONS,
+          requested: args.action,
+          hint: '不传 action（或 clear=true）回 "用户增长" 默认 tab',
+        });
+      }
+      const patch = {};
+      if (args.clear === true) {
+        // 回 growth tab：删掉 action（buildQueryPatch 把 null 视为 delete）。
+        patch.action = null;
+      } else if (args.action != null) {
+        patch.action = args.action;
+      }
+      if (Object.keys(patch).length === 0) {
+        return okResult({
+          ready: false,
+          reason: 'empty_patch',
+          from: { url: fromUrl },
+          hint: '至少指定 action 或 clear:true',
+        });
+      }
+      const toUrl = buildQueryPatch(patch);
+      if (toUrl === fromUrl) {
+        return okResult({ ready: true, noop: true, from: { url: fromUrl }, to: { url: toUrl } });
+      }
+      location.assign(toUrl);
+      return okResult({
+        ready: true,
+        from: { url: fromUrl },
+        to: { url: toUrl },
+        patch,
+        hint: '页面已发起导航；调用方应在新页面上再 state() 做自校验（session 层会自动重注 bridge）。',
+      });
+    } catch (e) { return errResult(e && e.message || e, { stack: e && e.stack }); }
+  }
+
+  const api = { probe, state, userOverview, userAttrs, navigateUser };
   Object.defineProperty(api, '__meta', {
     value: { version: VERSION, installedAt: new Date().toISOString() },
   });

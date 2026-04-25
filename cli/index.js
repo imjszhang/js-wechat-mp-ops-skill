@@ -117,32 +117,18 @@ async function runContentDetail(opts, positional) {
 }
 
 /**
- * content-navigate：INTERACTIVE 档位，仅改 URL，不点击。
- * 调用 bridge 的 navigateContent 后 reload 触发 bridge 丢失；
- * 通过 session.awaitBridgeAfterNav 等重注 + 自校验后返回新 state。
+ * runNavigate - INTERACTIVE 档位的统一执行器（content-navigate / user-navigate）
+ *
+ * 调 bridge 的 navigate 方法后，页面会触发 reload 把旧 bridge 卸掉，
+ * awaitBridgeAfterNav 负责轮询新页面 + 重注 bridge + 自校验 state.ready。
  */
-async function runContentNavigate(opts) {
-  const navArgs = {
-    action: opts.toAction || null,
-    type: opts.toType || null,
-    front_type: opts.toFrontType || null,
-    msgid: opts.msgid || null,
-    publishDate: opts.publishDate || null,
-    clear: !!opts.clear,
-  };
-  const hasAny = Object.values(navArgs).some((v) => v != null && v !== false && v !== '');
-  if (!hasAny) {
-    throw Object.assign(
-      new Error('content-navigate 至少要提供一个改参参数：--to-action/--to-type/--msgid/--publish-date/--clear'),
-      { code: 'E_BAD_ARG' },
-    );
-  }
-  const session = new Session({ opts: Object.assign({}, opts, { page: 'content-analysis' }) });
+async function runNavigate({ opts, pageKey, apiMethod, navArgs }) {
+  const session = new Session({ opts: Object.assign({}, opts, { page: pageKey }) });
   try {
     await session.connect();
     await session.resolveTarget();
     await session.ensureBridge();
-    const navResp = await session.callApi('navigateContent', [navArgs]);
+    const navResp = await session.callApi(apiMethod, [navArgs]);
     if (!navResp || !navResp.ok) {
       printJson({ nav: navResp, postState: null });
       return;
@@ -163,6 +149,39 @@ async function runContentNavigate(opts) {
   } finally {
     await session.close();
   }
+}
+
+async function runContentNavigate(opts) {
+  const navArgs = {
+    action: opts.toAction || null,
+    type: opts.toType || null,
+    front_type: opts.toFrontType || null,
+    msgid: opts.msgid || null,
+    publishDate: opts.publishDate || null,
+    clear: !!opts.clear,
+  };
+  const hasAny = Object.values(navArgs).some((v) => v != null && v !== false && v !== '');
+  if (!hasAny) {
+    throw Object.assign(
+      new Error('content-navigate 至少要提供一个改参参数：--to-action/--to-type/--msgid/--publish-date/--clear'),
+      { code: 'E_BAD_ARG' },
+    );
+  }
+  await runNavigate({ opts, pageKey: 'content-analysis', apiMethod: 'navigateContent', navArgs });
+}
+
+async function runUserNavigate(opts) {
+  const navArgs = {
+    action: opts.toAction || null,
+    clear: !!opts.clear,
+  };
+  if (!navArgs.action && !navArgs.clear) {
+    throw Object.assign(
+      new Error('user-navigate 至少要提供一个参数：--to-action <attr|activity_analysis_page> 或 --clear'),
+      { code: 'E_BAD_ARG' },
+    );
+  }
+  await runNavigate({ opts, pageKey: 'user-analysis', apiMethod: 'navigateUser', navArgs });
 }
 
 async function main(argv) {
@@ -191,6 +210,10 @@ async function main(argv) {
   }
   if (command === 'content-navigate') {
     await runContentNavigate(opts);
+    return 0;
+  }
+  if (command === 'user-navigate') {
+    await runUserNavigate(opts);
     return 0;
   }
   if (def.kind === 'call') {
