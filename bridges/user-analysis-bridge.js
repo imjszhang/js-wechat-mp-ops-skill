@@ -9,9 +9,14 @@
 
 (function install(){
   'use strict';
-  const VERSION = '0.1.1';
+  const VERSION = '0.1.2';
 
   // @@include ./common.js
+
+  const DEFAULT_ROW_LIMIT = 100;
+  const MAX_ROW_LIMIT = 200;
+  const MAX_RAW_TABLE_LIMIT = 6;
+  const MAX_RAW_TABLE_ROW_LIMIT = 10;
 
   function detectSubTab(){
     const u = new URL(location.href);
@@ -96,13 +101,15 @@
         return okResult({ ready: false, reason: 'table_not_found', subTab });
       }
 
+      const rowLimit = clampLimit(args.limit || args.rowLimit, DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT);
+      const totalRows = table.querySelectorAll('tbody tr').length;
       const rows = parseTableByHeaders(table, {
         date: [/时间|日期/],
         newFollow: [/新增关注/],
         cancelFollow: [/取消关注/],
         netFollow: [/净增关注/],
         cumulative: [/累计关注/],
-      });
+      }, { rowLimit });
 
       const normalized = rows.map((r) => ({
         date: r.date || null,
@@ -135,7 +142,8 @@
         latest,
         earliest,
         totals,
-        rowCount: normalized.length,
+        rowCount: totalRows,
+        returnedRows: normalized.length,
         dateRowCount: dateRows.length,
         currentCumulative: latest ? latest.cumulative : null,
         rows: normalized,
@@ -170,6 +178,7 @@
       }
 
       const sections = {};
+      const sectionRowLimit = clampLimit(args.rowLimit, DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT);
 
       // 性别分布
       const genderTable = findTableByHeader([/性别/, /占比|比例/]);
@@ -178,7 +187,7 @@
           label: [/性别|分类/],
           value: [/人数|数量/],
           percent: [/占比|比例/],
-        });
+        }, { rowLimit: sectionRowLimit });
       }
       // 年龄分布
       const ageTable = findTableByHeader([/年龄/, /占比|比例|人数/]);
@@ -187,7 +196,7 @@
           label: [/年龄段|年龄/],
           value: [/人数|数量/],
           percent: [/占比|比例/],
-        });
+        }, { rowLimit: sectionRowLimit });
       }
       // 地域（省 / 城市）
       const regionTable = findTableByHeader([/省份|地区|省|城市/, /占比|比例|人数/]);
@@ -196,7 +205,7 @@
           label: [/省份|地区|城市|省|区/],
           value: [/人数|数量/],
           percent: [/占比|比例/],
-        });
+        }, { rowLimit: sectionRowLimit });
       }
       // 终端
       const terminalTable = findTableByHeader([/终端|机型|设备/, /占比|比例|人数/]);
@@ -205,18 +214,21 @@
           label: [/终端|机型|设备/],
           value: [/人数|数量/],
           percent: [/占比|比例/],
-        });
+        }, { rowLimit: sectionRowLimit });
       }
 
       // 收集未归类表做 rawTables（每个 label 取前 5 行）
+      const rawTableLimit = clampLimit(args.tableLimit, MAX_RAW_TABLE_LIMIT, MAX_RAW_TABLE_LIMIT);
+      const rawTableRowLimit = clampLimit(args.rawRowLimit || args.rowLimit, 5, MAX_RAW_TABLE_ROW_LIMIT);
       const knownTables = new Set([genderTable, ageTable, regionTable, terminalTable].filter(Boolean));
-      const rawTables = Array.from(document.querySelectorAll('table'))
-        .filter((t) => !knownTables.has(t) && t.querySelectorAll('thead th').length > 0)
-        .slice(0, 6)
+      const rawTableCandidates = Array.from(document.querySelectorAll('table'))
+        .filter((t) => !knownTables.has(t) && t.querySelectorAll('thead th').length > 0);
+      const rawTables = rawTableCandidates.slice(0, rawTableLimit)
         .map((t) => ({
-          headers: Array.from(t.querySelectorAll('thead th')).map((th) => (th.textContent || '').replace(/\s+/g,'').trim()),
-          rows: Array.from(t.querySelectorAll('tbody tr')).slice(0, 5).map((tr) => Array.from(tr.querySelectorAll('td'))
-            .map((td) => (td.textContent || '').replace(/\s+/g,' ').trim())),
+          headers: Array.from(t.querySelectorAll('thead th')).map((th) => shortText((th.textContent || '').replace(/\s+/g,'').trim(), 80).text),
+          rowCount: t.querySelectorAll('tbody tr').length,
+          rows: Array.from(t.querySelectorAll('tbody tr')).slice(0, rawTableRowLimit).map((tr) => Array.from(tr.querySelectorAll('td'))
+            .map((td) => shortText((td.textContent || '').replace(/\s+/g,' ').trim(), 160).text)),
         }));
 
       const dates = readDateRangeFromDom();
@@ -227,6 +239,9 @@
         visibleRange: { from: dates.rangeFrom, to: dates.rangeTo },
         sections,
         sectionsFound: Object.keys(sections),
+        sectionRowLimit,
+        totalRawTables: rawTableCandidates.length,
+        returnedRawTables: rawTables.length,
         rawTables,
       });
     } catch (e) { return errResult(e && e.message || e, { stack: e && e.stack }); }

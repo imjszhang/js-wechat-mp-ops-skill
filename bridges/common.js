@@ -10,35 +10,69 @@ function parseTokenFromUrl(url){
   try { return new URL(url).searchParams.get('token'); } catch(_) { return null; }
 }
 
-function detectToken(){
-  try {
-    const t = new URLSearchParams(location.search).get('token');
-    if (t && /^\d{5,}$/.test(t)) return t;
-  } catch(_){}
-  try {
-    const scripts = Array.from(document.querySelectorAll('script:not([src])'))
-      .map(s => s.textContent).join('\n');
-    const m = /token\s*[:=]\s*['"]?(\d{5,})/.exec(scripts);
+const __mpOpsCommonCache = {
+  tokenHref: null,
+  token: null,
+  fingerprintHref: null,
+  fingerprint: null,
+};
+
+function clampLimit(value, defaultValue, maxValue){
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return defaultValue;
+  return Math.min(Math.floor(n), maxValue);
+}
+
+function shortText(value, maxLen){
+  const text = String(value == null ? '' : value);
+  const limit = clampLimit(maxLen, 2000, 20000);
+  if (text.length <= limit) return { text, truncated: false, length: text.length };
+  return { text: text.slice(0, limit), truncated: true, length: text.length };
+}
+
+function scanInlineScripts(pattern){
+  const scripts = document.querySelectorAll('script:not([src])');
+  for (const script of scripts){
+    const text = script.textContent || '';
+    const m = pattern.exec(text);
     if (m) return m[1];
-  } catch(_){}
+  }
   return null;
 }
 
+function detectToken(){
+  const href = location.href;
+  if (__mpOpsCommonCache.tokenHref === href) return __mpOpsCommonCache.token;
+  let token = null;
+  try {
+    const t = new URLSearchParams(location.search).get('token');
+    if (t && /^\d{5,}$/.test(t)) token = t;
+  } catch(_){}
+  if (!token) {
+    try { token = scanInlineScripts(/token\s*[:=]\s*['"]?(\d{5,})/); } catch(_){}
+  }
+  __mpOpsCommonCache.tokenHref = href;
+  __mpOpsCommonCache.token = token || null;
+  return __mpOpsCommonCache.token;
+}
+
 function detectFingerprint(){
+  const href = location.href;
+  if (__mpOpsCommonCache.fingerprintHref === href) return __mpOpsCommonCache.fingerprint;
+  let fingerprint = null;
   try {
     const entries = performance.getEntriesByType('resource') || [];
     for (const e of entries) {
       const m = /[?&]fingerprint=([0-9a-f]{16,})/i.exec(e.name);
-      if (m) return m[1];
+      if (m) { fingerprint = m[1]; break; }
     }
   } catch(_){}
-  try {
-    const scripts = Array.from(document.querySelectorAll('script:not([src])'))
-      .map(s => s.textContent).join('\n');
-    const m = /fingerprint\s*[:=]\s*['"]([0-9a-f]{16,})['"]/i.exec(scripts);
-    if (m) return m[1];
-  } catch(_){}
-  return null;
+  if (!fingerprint) {
+    try { fingerprint = scanInlineScripts(/fingerprint\s*[:=]\s*['"]([0-9a-f]{16,})['"]/i); } catch(_){}
+  }
+  __mpOpsCommonCache.fingerprintHref = href;
+  __mpOpsCommonCache.fingerprint = fingerprint || null;
+  return __mpOpsCommonCache.fingerprint;
 }
 
 function buildCgiUrl(path, params){
@@ -60,7 +94,7 @@ async function fetchCgiBin(path, params, options){
     return { ok: false, error: 'not_logged_in', reason: 'no_token_in_url' };
   }
   const url = buildCgiUrl(path, params || {});
-  let res, txt;
+  let res, data = null;
   try {
     res = await fetch(url, {
       method: options.method || 'GET',
@@ -70,13 +104,41 @@ async function fetchCgiBin(path, params, options){
         'Accept': 'application/json, text/javascript, */*',
       }, options.headers || {}),
     });
-    txt = await res.text();
+    const contentType = (res.headers && res.headers.get && res.headers.get('content-type')) || '';
+    if (/json|javascript/i.test(contentType)) {
+      data = await res.json();
+    } else {
+      const snippet = shortText(await res.text(), options.textLimit || 2000);
+      data = { text: snippet.text, truncated: snippet.truncated, length: snippet.length };
+    }
   } catch (e) {
     return { ok: false, error: 'network_error', message: String((e && e.message) || e) };
   }
-  let data = null;
-  try { data = JSON.parse(txt); } catch(_) { data = txt; }
   return { ok: res.ok, httpStatus: res.status, url, data };
+}
+
+function summarizeCgiResponse(resp){
+  if (!resp) return null;
+  const data = resp.data;
+  const out = {
+    ok: !!resp.ok,
+    httpStatus: resp.httpStatus || null,
+    url: resp.url || null,
+  };
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    out.base_resp = data.base_resp || null;
+    out.dataKeys = Object.keys(data).slice(0, 20);
+    const tendencyList = data.all_article_stat_tendency && data.all_article_stat_tendency.list;
+    const sourceList = data.all_article_stat_source && data.all_article_stat_source.list;
+    if (Array.isArray(tendencyList)) out.tendencyCount = tendencyList.length;
+    if (Array.isArray(sourceList)) out.sourceCount = sourceList.length;
+    if (typeof data.text === 'string') out.text = shortText(data.text, 512);
+  } else if (typeof data === 'string') {
+    out.text = shortText(data, 512);
+  }
+  if (resp.error) out.error = resp.error;
+  if (resp.message) out.message = resp.message;
+  return out;
 }
 
 function readAccountInfo(){
@@ -183,8 +245,9 @@ function textNum(s){
   return Number.isFinite(n) ? n : null;
 }
 
-function parseTableByHeaders(table, headerMap){
+function parseTableByHeaders(table, headerMap, options){
   if (!table) return [];
+  options = options || {};
   const ths = Array.from(table.querySelectorAll('thead th'));
   const colIdx = {};
   for (const k of Object.keys(headerMap || {})){
@@ -197,14 +260,15 @@ function parseTableByHeaders(table, headerMap){
     });
     if (idx >= 0) colIdx[k] = idx;
   }
-  const rows = Array.from(table.querySelectorAll('tbody tr'));
+  const rows = Array.from(table.querySelectorAll('tbody tr'))
+    .slice(0, clampLimit(options.rowLimit, 1000, 5000));
   return rows.map((tr) => {
     const tds = Array.from(tr.querySelectorAll('td'));
-    const row = { __raw: tds.map((td) => (td.textContent || '').replace(/\s+/g,' ').trim()) };
+    const row = { __raw: tds.map((td) => shortText((td.textContent || '').replace(/\s+/g,' ').trim(), 160).text) };
     for (const k of Object.keys(colIdx)){
       const td = tds[colIdx[k]];
       if (!td) continue;
-      row[k] = (td.textContent || '').replace(/\s+/g,' ').trim();
+      row[k] = shortText((td.textContent || '').replace(/\s+/g,' ').trim(), 160).text;
     }
     return row;
   });

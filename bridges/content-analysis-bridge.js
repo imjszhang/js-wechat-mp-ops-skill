@@ -9,9 +9,16 @@
 
 (function install(){
   'use strict';
-  const VERSION = '0.3.0';
+  const VERSION = '0.3.1';
 
   // @@include ./common.js
+
+  const DEFAULT_LIST_LIMIT = 100;
+  const MAX_LIST_LIMIT = 200;
+  const MAX_TABLE_DUMP_LIMIT = 8;
+  const MAX_TABLE_ROW_LIMIT = 20;
+  const MAX_TREND_SERIES_LIMIT = 120;
+  const MAX_CHANNEL_LIMIT = 200;
 
   function probe(){
     try {
@@ -122,7 +129,7 @@
           const titleCell = tds[0];
           const titleText = (titleCell.textContent || '').replace(/\s+/g, ' ').trim();
           const titleMatch = titleText.match(/^(.*?)\s*发表时间[：:]\s*(\d{4}\/\d{2}\/\d{2})/);
-          const title = titleMatch ? titleMatch[1] : titleText;
+          const title = shortText(titleMatch ? titleMatch[1] : titleText, 160).text;
           const publishDate = titleMatch ? titleMatch[2].replace(/\//g, '-') : null;
           const a = tr.querySelector('a[href*="action=detailpage"]');
           let msgid = null, publish_date_url = null, detailHref = null;
@@ -139,24 +146,24 @@
             title,
             publishDate: publish_date_url || publishDate,
             reads: textNum(tds[1].textContent),
-            readsRate: (tds[2].textContent || '').replace(/\s+/g,' ').trim(),
+            readsRate: shortText((tds[2].textContent || '').replace(/\s+/g,' ').trim(), 80).text,
             detailHref,
           });
         }
       }
 
-      const limit = args.limit ? Number(args.limit) : null;
-      const limited = limit ? items.slice(0, limit) : items;
+      const limit = clampLimit(args.limit, Math.min(items.length, DEFAULT_LIST_LIMIT), MAX_LIST_LIMIT);
+      const limited = items.slice(0, limit);
 
       // 可选：XHR 趋势 + 来源
-      let tendency = null;
+      let tendencySummary = null;
       if (args.range || args.dateFrom || args.dateTo) {
         const resp = await fetchCgiBin('/misc/appmsganalysis', {
           action: 'get_article_stat_tendency_and_source',
           begin_timestamp: String(range.beginTimestamp),
           end_timestamp: String(range.endTimestamp),
         });
-        tendency = resp;
+        tendencySummary = summarizeCgiResponse(resp);
       }
 
       return okResult({
@@ -167,8 +174,9 @@
           ? Array.from(table.querySelectorAll('thead th')).map((th) => (th.textContent || '').replace(/\s+/g,'').trim())
           : [],
         totalCount: items.length,
+        returnedCount: limited.length,
         items: limited,
-        tendency,
+        tendencySummary,
       });
     } catch (e) { return errResult(e && e.message || e, { stack: e && e.stack }); }
   }
@@ -210,11 +218,11 @@
           followAfterRead: [/阅读后关注/],
           listenCount: [/听全文/],
         };
-        const tipEls = Array.from(document.querySelectorAll('.bottom_data_tips'));
+        const tipEls = Array.from(document.querySelectorAll('.bottom_data_tips')).slice(0, 40);
         const topKpis = {};
         const topKpisRaw = tipEls.map((el) => {
-          const raw = (el.textContent || '').replace(/\s+/g,' ').trim();
-          const val = (el.querySelector('.tips_val_num')?.textContent || '').trim();
+          const raw = shortText((el.textContent || '').replace(/\s+/g,' ').trim(), 160).text;
+          const val = shortText((el.querySelector('.tips_val_num')?.textContent || '').trim(), 80).text;
           return { raw, val };
         });
         for (const item of topKpisRaw) {
@@ -228,10 +236,10 @@
         }
 
         // ── 互动指标（data_list：分享 / 赞赏 / 留言 / 收藏 等） ───────────────────
-        const interactions = Array.from(document.querySelectorAll('.data_list')).map((row) => {
-          const label = (row.querySelector('.list_left')?.textContent || '').replace(/\s+/g,' ').trim();
+        const interactions = Array.from(document.querySelectorAll('.data_list')).slice(0, 40).map((row) => {
+          const label = shortText((row.querySelector('.list_left')?.textContent || '').replace(/\s+/g,' ').trim(), 80).text;
           const value = (row.querySelector('.list_right .data_num')?.textContent || '').trim();
-          const unit = (row.querySelector('.list_right .data_unit')?.textContent || '').replace(/\s+/g,' ').trim();
+          const unit = shortText((row.querySelector('.list_right .data_unit')?.textContent || '').replace(/\s+/g,' ').trim(), 40).text;
           return { label: label || null, value: value ? textNum(value) : null, unit: unit || null };
         }).filter((r) => r.value != null);
         const interactionMap = {};
@@ -251,17 +259,19 @@
         }
 
         // ── 地域/来源/终端 表格（只取有 thead 的） ─────────────────────────────
+        const tableLimit = clampLimit(args.tableLimit, MAX_TABLE_DUMP_LIMIT, MAX_TABLE_DUMP_LIMIT);
+        const rowLimit = clampLimit(args.rowLimit, 10, MAX_TABLE_ROW_LIMIT);
         const tables = Array.from(document.querySelectorAll('table'))
           .filter((t) => t.querySelectorAll('thead th').length > 0)
-          .slice(0, 8);
+          .slice(0, tableLimit);
         const tableSummaries = tables.map((t) => {
           const headers = Array.from(t.querySelectorAll('thead th'))
-            .map((th) => (th.textContent || '').replace(/\s+/g,'').trim());
+            .map((th) => shortText((th.textContent || '').replace(/\s+/g,'').trim(), 80).text);
           const rowCount = t.querySelectorAll('tbody tr').length;
-          const rows = Array.from(t.querySelectorAll('tbody tr')).slice(0, 10).map((tr) =>
-            Array.from(tr.querySelectorAll('td')).map((td) => (td.textContent || '').replace(/\s+/g,' ').trim()),
+          const rows = Array.from(t.querySelectorAll('tbody tr')).slice(0, rowLimit).map((tr) =>
+            Array.from(tr.querySelectorAll('td')).map((td) => shortText((td.textContent || '').replace(/\s+/g,' ').trim(), 160).text),
           );
-          return { headers, rowCount, rows };
+          return { headers, rowCount, returnedRows: rows.length, rows };
         });
 
         const title = (document.title || '').replace(/公众号|内容分析/g, '').trim() || null;
@@ -271,7 +281,7 @@
           mode: 'in_detail_page',
           msgid: curMsgid,
           publish_date: curDate,
-          title,
+          title: shortText(title, 160).text || null,
           kpis: topKpis,
           kpisRaw: topKpisRaw,
           interactions,
@@ -281,6 +291,7 @@
       }
 
       // 非详情页：返回候选 detail 链接，告诉调用方先导航
+      const candidateLimit = clampLimit(args.candidateLimit, 20, 100);
       const candidates = Array.from(document.querySelectorAll('a[href*="action=detailpage"]'))
         .map((a) => {
           try {
@@ -289,7 +300,7 @@
               msgid: u2.searchParams.get('msgid'),
               publish_date: u2.searchParams.get('publish_date'),
               href: a.href,
-              text: (a.textContent || '').trim().slice(0, 30),
+              text: shortText((a.textContent || '').trim(), 80).text,
             };
           } catch(_){ return null; }
         }).filter(Boolean);
@@ -300,7 +311,9 @@
         hint: '请先在浏览器中把 tab 切换到 action=detailpage&msgid=<id>&publish_date=<YYYY-MM-DD> 的 URL，或重新调用 CLI 并附带 --tab <id>。',
         requested: { msgid: args.msgid, publishDate: args.publishDate },
         candidate: hit,
-        candidates: candidates.slice(0, 20),
+        totalCandidates: candidates.length,
+        returnedCandidates: Math.min(candidates.length, candidateLimit),
+        candidates: candidates.slice(0, candidateLimit),
       });
     } catch (e) { return errResult(e && e.message || e, { stack: e && e.stack }); }
   }
@@ -343,12 +356,12 @@
       for (const sel of kpiSelectors){
         const nodes = Array.from(document.querySelectorAll(sel));
         for (const el of nodes){
-          const raw = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          const raw = shortText((el.textContent || '').replace(/\s+/g, ' ').trim(), 160).text;
           if (!raw || seen.has(raw)) continue;
           seen.add(raw);
           const numMatch = raw.match(/([\d,.]+)\s*([%人次元篇天分秒]*)/);
           kpiCards.push({
-            raw: raw.slice(0, 120),
+            raw,
             label: raw.replace(/[\d,%人次元篇天分秒\s.]+$/, '').trim().slice(0, 40) || null,
             value: numMatch ? textNum(numMatch[1]) : null,
             unit: numMatch && numMatch[2] ? numMatch[2] : null,
@@ -396,7 +409,7 @@
           const titleCell = tds[0];
           const titleText = (titleCell.textContent || '').replace(/\s+/g, ' ').trim();
           const titleMatch = titleText.match(/^(.*?)\s*发表时间[：:]\s*(\d{4}\/\d{2}\/\d{2})/);
-          const title = titleMatch ? titleMatch[1] : titleText;
+          const title = shortText(titleMatch ? titleMatch[1] : titleText, 160).text;
           const publishDate = titleMatch ? titleMatch[2].replace(/\//g, '-') : null;
           const a = tr.querySelector('a[href*="action=detailpage"]');
           let msgid = null, publish_date_url = null, detailHref = null;
@@ -413,14 +426,14 @@
             title,
             publishDate: publish_date_url || publishDate,
             reads: textNum(tds[1].textContent),
-            readsRate: (tds[2].textContent || '').replace(/\s+/g,' ').trim(),
+            readsRate: shortText((tds[2].textContent || '').replace(/\s+/g,' ').trim(), 80).text,
             detailHref,
           });
         }
       }
 
-      const limit = args.limit ? Number(args.limit) : null;
-      const limited = (limit && limit > 0) ? items.slice(0, limit) : items;
+      const limit = clampLimit(args.limit, Math.min(items.length, MAX_LIST_LIMIT), MAX_LIST_LIMIT);
+      const limited = items.slice(0, limit);
       return okResult({
         login,
         listTableFound: !!table,
@@ -428,6 +441,7 @@
           ? Array.from(table.querySelectorAll('thead th')).map((th) => (th.textContent || '').replace(/\s+/g,'').trim())
           : [],
         totalCount: items.length,
+        returnedCount: limited.length,
         items: limited,
         pagination: readPaginator(),
       });
@@ -438,22 +452,23 @@
   function contentTablesDump(args){
     args = args || {};
     try {
-      const limit = Number(args.limit) > 0 ? Number(args.limit) : 8;
-      const rowLimit = Number(args.rowLimit) > 0 ? Number(args.rowLimit) : 10;
-      const tables = Array.from(document.querySelectorAll('table'))
-        .filter((t) => t.querySelectorAll('thead th').length > 0)
-        .slice(0, limit);
+      const limit = clampLimit(args.limit, 8, MAX_TABLE_DUMP_LIMIT);
+      const rowLimit = clampLimit(args.rowLimit, 10, MAX_TABLE_ROW_LIMIT);
+      const allTables = Array.from(document.querySelectorAll('table'))
+        .filter((t) => t.querySelectorAll('thead th').length > 0);
+      const tables = allTables.slice(0, limit);
       const tableSummaries = tables.map((t, idx) => {
         const headers = Array.from(t.querySelectorAll('thead th'))
-          .map((th) => (th.textContent || '').replace(/\s+/g,'').trim());
+          .map((th) => shortText((th.textContent || '').replace(/\s+/g,'').trim(), 80).text);
         const rowCount = t.querySelectorAll('tbody tr').length;
         const rows = Array.from(t.querySelectorAll('tbody tr')).slice(0, rowLimit).map((tr) =>
-          Array.from(tr.querySelectorAll('td')).map((td) => (td.textContent || '').replace(/\s+/g,' ').trim()),
+          Array.from(tr.querySelectorAll('td')).map((td) => shortText((td.textContent || '').replace(/\s+/g,' ').trim(), 160).text),
         );
-        return { index: idx, headers, rowCount, rows };
+        return { index: idx, headers, rowCount, returnedRows: rows.length, rows };
       });
       return okResult({
-        totalTablesWithHead: tableSummaries.length,
+        totalTablesWithHead: allTables.length,
+        returnedTablesWithHead: tableSummaries.length,
         totalTables: document.querySelectorAll('table').length,
         tables: tableSummaries,
       });
@@ -503,7 +518,7 @@
       if (!login.loggedIn) return errResult('not_logged_in', { login });
       const { range, resp } = await fetchTendencyRaw(args);
       if (!resp || !resp.ok || !resp.data) {
-        return okResult({ ready: false, reason: 'xhr_failed', range, raw: resp || null });
+        return okResult({ ready: false, reason: 'xhr_failed', range, raw: summarizeCgiResponse(resp) });
       }
       const base = resp.data.base_resp || {};
       if (base.ret !== 0) {
@@ -520,11 +535,19 @@
         if (row.scene === 9999) byDate[iso].total = enriched;
         else byDate[iso].scenes.push(enriched);
       }
-      const series = Object.values(byDate).sort((a, b) => a.timestamp - b.timestamp);
+      const seriesLimit = clampLimit(args.limit, MAX_TREND_SERIES_LIMIT, MAX_TREND_SERIES_LIMIT);
+      const sceneLimit = clampLimit(args.sceneLimit, 50, 100);
+      const allSeries = Object.values(byDate).sort((a, b) => a.timestamp - b.timestamp);
+      const series = allSeries.slice(-seriesLimit).map((day) => Object.assign({}, day, {
+        totalSceneCount: day.scenes.length,
+        scenes: day.scenes.slice(0, sceneLimit),
+      }));
       return okResult({
         ready: true,
         range,
         series,
+        totalSeries: allSeries.length,
+        returnedSeries: series.length,
         totalPoints: rawList.length,
         url: resp.url || null,
       });
@@ -541,7 +564,7 @@
       if (!login.loggedIn) return errResult('not_logged_in', { login });
       const { range, resp } = await fetchTendencyRaw(args);
       if (!resp || !resp.ok || !resp.data) {
-        return okResult({ ready: false, reason: 'xhr_failed', range, raw: resp || null });
+        return okResult({ ready: false, reason: 'xhr_failed', range, raw: summarizeCgiResponse(resp) });
       }
       const base = resp.data.base_resp || {};
       if (base.ret !== 0) {
@@ -556,11 +579,15 @@
       const withShare = channels.map((r) => Object.assign({}, r, {
         readUvShare: totalReadUv > 0 ? Number((r.read_uv / totalReadUv * 100).toFixed(2)) : null,
       }));
+      const sorted = withShare.sort((a, b) => (b.read_uv || 0) - (a.read_uv || 0));
+      const channelLimit = clampLimit(args.limit, 100, MAX_CHANNEL_LIMIT);
       return okResult({
         ready: true,
         range,
         totalReadUv,
-        channels: withShare.sort((a, b) => (b.read_uv || 0) - (a.read_uv || 0)),
+        totalChannels: sorted.length,
+        returnedChannels: Math.min(sorted.length, channelLimit),
+        channels: sorted.slice(0, channelLimit),
         url: resp.url || null,
       });
     } catch (e) { return errResult(e && e.message || e, { stack: e && e.stack }); }

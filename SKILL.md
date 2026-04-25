@@ -132,6 +132,15 @@ CLI / Tool call
 
 每个 bridge 顶部维护 `const VERSION = 'x.y.z'`。`session.ensureBridge()` 会读当前 bridge 版本，不一致时重注。共享 helpers 写在 `bridges/common.js`，通过 `// @@include ./common.js` 在注入前内联（不是运行时 require），所以所有 helpers 仍然是纯浏览器 JS。
 
+### 内存保护与大响应限制
+
+bridge 注入后不注册事件监听器、定时器或 `MutationObserver`，只在 `window.__jse_mp_*__` 上挂载当前版本 API。为避免页面上下文和浏览器扩展之间传递过大的对象，当前版本做了以下限制：
+
+- `detectToken()` / `detectFingerprint()` 按当前 URL 缓存结果；fallback 扫描 inline script 时逐个短路匹配，不再拼接全部脚本文本。
+- `fetchCgiBin()` 优先按 JSON 解析响应；非 JSON 响应只返回短文本摘要，避免把完整 HTML/文本跨进程传出。
+- 列表、趋势、来源、详情表格和调试 dump 都有默认返回上限和最大上限；响应会附带 `total*` / `returned*` 字段说明是否被截断。
+- `content-list --range/--from/--to` 不再返回完整 XHR 原始响应，只返回 `tendencySummary`，完整趋势数据请使用 `content-trend` / `content-sources` 的结构化结果。
+
 ### 为什么用 XHR 重放（v0.2+）
 
 当前 v0.1 主要靠 DOM（表格 + KPI 卡）。未来要扩展趋势图（Highcharts SVG），会在 `bridges/common.js::fetchCgiBin` 里重放 `/misc/appmsganalysis` 的 `action=get_article_stat_tendency_and_source` 等接口。DOM 读不到的数据走 XHR；可以读到就优先 DOM。
